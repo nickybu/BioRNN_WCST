@@ -1,0 +1,160 @@
+# Interrogating the locus and controllability of rule representations in a two-module biological RNN model of task switching
+
+*A critical re-analysis of Liu & Wang (2024), "Flexible gating between subspaces in a neural network model of internally guided task switching" (Nature Communications 15, 6497). DOI: 10.1038/s41467-024-50501-y.*
+
+---
+
+## Abstract
+
+Liu & Wang (2024) trained a two-module, biologically structured recurrent network — a prefrontal (PFC) and a sensorimotor (SR) module, each with Dale's-law excitatory cells, two dendritic branches, and PV/SST/VIP interneuron classes — on the Wisconsin Card Sorting Task. They reported that (i) the abstract task rule is maintained by two attractor states in PFC, and (ii) somatostatin (SST) interneurons gate the angle between the two rule subspaces in the SR module through dendrite-targeting inhibition, providing a mechanism for keeping task representations orthogonal. Motivated by a downstream interest in continual/transfer motor learning — where control over representational geometry could determine whether learned dynamics are reusable across related tasks — we re-analysed an ensemble of 151 pretrained networks provided by the original authors and asked four questions the original paper leaves open. **(1) Where is the rule actually maintained — PFC, SR, or the interaction between them?** Autonomous-dynamics and cross-module-silencing analyses show the rule is held in the **PFC↔SR loop**: neither module sustains its rule attractor alone once the inter-modular connections are cut. **(2) Is the rule held in recurrent dynamics or in feedforward connectivity?** The rule is decodable at ≈0.91 accuracy during the inter-trial interval, before the stimulus card appears, in 36/36 networks — it is carried by **recurrent dynamics**, not re-derived feedforwardly from the input. **(3) Is SST the *only* controller of the rule-subspace angle?** No: silencing PV collapses the angle at least as much as silencing SST, and across manipulations the angle collapse is largely a **generic readout of task performance** (Pearson r≈0.86; R²≈0.74) rather than an SST-specific effect. **(4) What is the role of PV interneurons?** Silencing PV neurons in a dose-graded fashion reveals two regimes: performance degrades *gracefully* as up to half the PV population is removed (with the network staying stable), but above ~75% PV loss the network hits a *stability cliff* and diverges into runaway excitation — an effect specific to PV (VIP silencing is near-inert; SST silencing degrades performance but preserves stability). PV thus plays a graded role in task computation and a threshold role in dynamical stability. Together the completed analyses support the original paper's picture of a distributed, recurrently-maintained rule representation, but qualify the headline SST-gating claim: representational orthogonality in this model is better described as a by-product of competent task performance than as an independently SST-controllable dial. The remaining ablation experiments (drop-dendrites/shrink, emergence-during-learning, and the transfer capstone) require retraining and are deferred pending a compute decision.
+
+---
+
+## 1. Introduction
+
+Flexible behaviour requires holding an abstract rule in mind and using it to route the same sensory input to different actions. Liu & Wang (2024) modelled this with a two-module recurrent neural network (RNN) trained on the Wisconsin Card Sorting Task (WCST), in which a subject must sort a centre card against test cards by a currently-active but uncued rule (colour or shape) and switch rules when feedback indicates the rule has changed. Their model is unusually biologically detailed: two modules ("PFC" and "SR", for sensorimotor) each contain excitatory pyramidal cells with two dendritic branches and three interneuron classes (PV, SST, VIP), obey Dale's law, and are connected by structured long-range projections. The paper's two central claims are:
+
+1. **Rule maintenance by PFC attractors.** The abstract rule is represented by two attractor states in the PFC module; lesioning the inter-modular connections collapses PFC to a trivial fixed point in the large majority of networks.
+2. **SST-gated subspace geometry.** In the SR module the neural representations of the two rules occupy near-orthogonal subspaces, and the angle between them is set by SST interneurons acting through dendrite-targeting inhibition; silencing SR-SST reduces both the subspace angle and task performance.
+
+The second claim is the one with the most direct relevance to continual and transfer learning: if a specific, biologically identifiable cell class controls how orthogonal two task representations are, that mechanism could in principle be used to *tune* representational overlap — keeping tasks separated to avoid interference, or deliberately overlapping them to reuse learned dynamics for a related task. Before building on that idea, we wanted to test how robustly it actually holds in the model. We also noted that the first claim, as stated, localises rule maintenance to PFC, whereas the same lesion result ("collapse requires inter-modular connections") is equally consistent with the rule living in the *interaction* between modules rather than in PFC alone.
+
+We therefore posed four questions, analysed on the ensemble of 151 pretrained networks released by the authors (and, for the ablation questions, on networks we retrain with a self-contained reimplementation of the authors' curriculum):
+
+- **Q(core-1):** Is the rule maintained in PFC, in SR, or in the PFC↔SR loop?
+- **Q(core-2):** Is the rule held in ongoing recurrent dynamics, or re-derived each moment from feedforward inputs?
+- **Q(D):** Is SST inhibition the *unique* controller of the SR rule-subspace angle, or do other perturbations produce the same effect?
+- **Q(A–C) and transfer capstone:** How does the network cope without PV interneurons (A) or without dendrites and with only a handful of neurons (B); how do these emergent properties arise *during* learning (C); and does rule-subspace geometry predict reusability of learned dynamics on a related task (capstone)?
+
+This manuscript reports the completed analyses for Q(core-1), Q(core-2) and Q(D), together with a validation that our independent analysis pipeline reproduces the original paper's baseline signatures. The retraining-based questions (A, B, C, capstone) are in progress and their sections are marked accordingly.
+
+---
+
+## 2. Methods
+
+### 2.1 Model and networks
+
+We used the original authors' model code (`model_working.py`, `task.py`, `functions.py`) and the ensemble of pretrained checkpoints they provided (n = 151 networks). Each network has two modules; each module contains 70 excitatory pyramidal somata (each with 2 dendritic branches), 10 PV, 10 SST and 10 VIP interneurons, giving 200 distinct neurons and 480 state compartments per network. Connectivity obeys Dale's law via a fixed sign mask, and the effective weight is `|w| · mask + w_fix`. The two modules are coupled by structured long-range projections: PFC excitatory somata project to SR dendrites (top-down) and SR excitatory somata project to PFC dendrites (bottom-up), with additional interneuron cross-targets.
+
+The 151 networks span four training regimes (61 "fast-switching main", 57 with SST→dendrite sparsity 0, 24 slow/early-stopping, 9 with variable ITI), two dendritic nonlinearities (81 divisive, 70 subtractive), and five SST→dendrite sparsity levels. Unless otherwise stated, the ensemble analyses below use the **36 subtractive-dendrite fast-switching-main networks** ("subtr-main"), which correspond to the configuration shown in the paper's main-text figures. Mean test performance across all 151 networks is 0.931.
+
+### 2.2 Analysis pipeline
+
+We wrote a self-contained analysis module (`analysis.py`) that loads a checkpoint (patching the `output_noise` attribute absent from older saves), simulates the network on WCST blocks, and computes the read-outs below. All decoding, subspace and silencing analyses were validated against the original paper's reported baseline signatures before use (Section 3.1).
+
+**Rule decoding.** Cross-validated logistic-regression decoding of the active rule from a population's activity at a chosen timestep, using stratified 5-fold cross-validation; chance ≈ 0.5 for the two-rule task.
+
+**Rule-subspace principal angle.** For each rule we stack trial × timestep activity points, reduce to a subspace whose dimensionality is set by the participation ratio, and compute the largest principal angle between the two rules' subspaces (`scipy.linalg.subspace_angles`). The shuffle null splits trials at random, ignoring rule label. Trajectory-trials containing any non-finite value (which arise when a silencing perturbation destabilises the network) are dropped before PCA.
+
+**Optogenetic-style silencing.** As in the paper, silencing clamps the activity of a target cell population to 0 throughout the trial and inter-trial interval (via the model's `opto` mechanism).
+
+**Inter-modular lesion.** All cross-module weight entries (both directions) are zeroed, isolating the two modules while preserving within-module recurrence.
+
+**Autonomous dynamics.** Starting from a network state captured at a chosen timestep, we run the recurrent dynamics forward with zero external input and zero trial-history input, and measure whether the separation between the two rules' states is retained (retention ratio = separation after N autonomous steps / initial separation).
+
+**Rule-current decomposition.** Using the convention `W[sender, receiver]`, we separate the recurrent current driving the rule-difference (rule-0 minus rule-1 mean activity) into a within-module ("local") component and a cross-module ("long-range") component, measured into each module's soma and dendrite compartments. Because long-range projections target dendrites, the decomposition is computed over soma+dendrite compartments.
+
+### 2.3 Retraining harness
+
+For the ablation questions we reimplemented the authors' curriculum-learning protocol in a self-contained, machine-agnostic harness (`train_local.py`) with all hardcoded cluster paths removed. The curriculum has three stages: (0) the previous trial's stimulus, choice and reward are supplied as trial-history input; (1) the previous stimulus is removed once performance is stable; (2) the previous choice is removed. A network is considered converged when it maintains criterion performance with only reward feedback. To fit CPU-only compute we validated a compressed trial timing (80 vs 210 timesteps) that preserves task structure while cutting dead time.
+
+Two implementation notes matter for reproducibility. First, we found and fixed a latent bug in the original `compute_trial_history`: it slices the previous trial's stimulus tensor using the current trial's card-window indices, which under variable inter-trial intervals can index out of range and produce NaNs (rare at full timing, frequent at compressed timing). Second, we found that advancing the curriculum on a single noisy training block (as an early version of our harness did) lets a network progress to the hardest stage on the strength of a lucky block before it has actually learned the sensorimotor mapping; we therefore advance only when a running average over the last 10 blocks clears the criterion on *both* response and rule performance, matching the paper's "stable performance over recent tests" intent. Checkpoints save model weights, optimizer state and curriculum stage, so training is fully resumable.
+
+Third — and important for interpreting the retrained networks — we found that the *degree* of trial compression matters for whether a network can converge at all. A control network trained under an aggressive compression (800 ms trials, versus the original 2100 ms) advanced correctly through the curriculum under the stable-average criterion but then plateaued at ≈0.50 test performance, with rule performance collapsing to chance once the last trial-history scaffold was removed. Diagnosis traces this to the pre-card inter-trial gap, which the aggressive compression shrinks roughly five-fold (from ≈1000 ms to ≈200 ms). That gap is precisely the interval over which the recurrent attractor must hold the rule across trials — the mechanism identified in Section 3.3 — so compressing it too far removes the very dynamics the model relies on. All 151 pretrained networks used the full 2100 ms timing. We therefore retrain the ablation networks at (or near) full timing rather than the aggressive compression; the compressed setting is retained only for rapid harness debugging, not for producing networks whose representations are meant to be comparable to the pretrained ensemble.
+
+### 2.4 Statistics
+
+Ensemble comparisons of paired within-network manipulations (e.g. angle before vs after silencing) use the two-sided Wilcoxon signed-rank test. Confound analyses regress the angle change on the performance change across all network × manipulation observations and report the Pearson correlation and its square (variance explained). We report the correlation coefficient r and R² = r² separately to avoid conflating them.
+
+---
+
+## 3. Results
+
+### 3.1 Validation: the pipeline reproduces the original baseline signatures
+
+Before addressing our questions we confirmed that our independent pipeline reproduces the paper's baseline phenomenology on the subtr-main networks. Across 8 validation networks, the SR module's two rule subspaces are near-orthogonal (angle 84.0 ± 5.9°), while the PFC angle is variable across networks (2°–82°). The SR angle exceeds the per-network trial-shuffle null (95th percentile) in 6 of 8 networks, but that null is itself high and variable (mean ≈61°, range 25°–90° across the 8 networks), reflecting the modest number of trials per split. The cleanest evidence that the near-orthogonal SR geometry is real and functional is therefore not the shuffle comparison but the paired silencing test below, where removing SR-SST collapses the angle within each network. Silencing SR-SST collapses the SR angle to 27.4 ± 15.8° (Wilcoxon p = 0.008) and drops task performance from 0.92 to 0.39, reproducing the paper's Fig. 7e/f. Cutting the inter-modular connections drops PFC rule decoding from 0.91 to at or below chance (≈0.40; all 8/8 networks between 0.35 and 0.46; Wilcoxon p = 0.008), reproducing the paper's rule-attractor-collapse result. These baseline signatures match the original report, licensing the analyses that follow.
+
+![Validation: the analysis pipeline reproduces the paper's baseline signatures across 8 subtractive-main networks. (a) SR rule subspaces are near-orthogonal while PFC angles are variable. (b) Silencing SR-SST collapses the SR angle. (c) Inter-modular lesion drops PFC rule decoding to at/below chance.]({{artifact:36e8bdcc-a50b-43ea-8058-b67e874007a9}})
+
+### 3.2 Q(core-1): the rule is maintained in the PFC↔SR loop, not in either module alone
+
+The paper localises rule maintenance to PFC attractors, supported by the observation that inter-modular lesion collapses PFC to a trivial fixed point. We asked whether that result licenses "the rule lives in PFC" or only "the rule lives in the PFC↔SR interaction." Three analyses across the 36 subtr-main networks point to the latter.
+
+First, both modules decode the rule well in the intact network (PFC 0.90, SR 0.86), so neither is a passive follower. Second, in an autonomous-dynamics test — releasing the network from a rule-carrying state with no input — both modules retain their rule-state separation when intact (retention ratio PFC 1.23, SR 1.26) but both collapse to the same trivial fixed point once the inter-modular connections are cut (PFC 0.22, SR 0.31; both Wilcoxon p = 2.9 × 10⁻¹¹). The attractor is thus a property of the coupled system, and it is lost symmetrically in *both* modules, not only PFC. Third, cross-module silencing is symmetric: silencing PFC excitatory output drops SR rule decoding from 0.86 to 0.49, and silencing SR excitatory output drops PFC rule decoding from 0.90 to 0.51 (both p = 1.7 × 10⁻⁷). Neither module maintains its rule representation without ongoing drive from the other. Consistent with this, the long-range component of the rule-difference current is substantial in both directions and is in fact larger into SR (frac_long 0.31) than into PFC (0.19) — i.e. SR receives *more* top-down rule current than PFC receives bottom-up.
+
+The verdict is that the rule is maintained in the **PFC↔SR loop**. This supports the user's intuition that PFC is not the sole locus — but the mechanism is distributed and interaction-dependent rather than SR-dominant: the rule cannot be pinned to either module alone.
+
+![Q(core-1): rule maintenance is a property of the PFC↔SR loop. (a) Rule-decoding time course in both modules (ensemble mean ± SEM, n = 36). (b) Autonomous rule-state retention collapses in both modules after inter-modular lesion. (c) Cross-module silencing symmetrically abolishes rule decoding in the other module. (d) Long-range fraction of the rule-difference current, larger into SR than into PFC.]({{artifact:8b396606-d7a9-4906-a956-a9b93e49db7c}})
+
+### 3.3 Q(core-2): the rule is held in recurrent dynamics, not feedforward connectivity
+
+A distinct question is *how* the loop holds the rule: through ongoing recurrent dynamics (an attractor that persists between inputs), or by feedforward re-derivation of the rule from the current input at each moment. In the WCST the stimulus cards are identical under both rules — the rule is internal — so any rule-difference in feedforward input current is ≈ 0 by construction, already suggesting a recurrent origin. We tested this directly.
+
+The decisive result is that the rule is decodable at ≈0.91 accuracy during the inter-trial interval, at a timestep *before the stimulus card appears* (pre-card decode 0.910 ± 0.02 across n = 36; PFC 0.90, SR 0.80 at that moment). Because no stimulus is present, this cannot be a feedforward read-out of the current card; the rule is being carried across the gap by recurrent activity. This held in **36/36 networks** (all with pre-card decoding > 0.7; one-sample Wilcoxon against chance p = 1.5 × 10⁻⁷). Consistent with this, the recurrent rule-difference current into each module's soma is large and sustained through the inter-trial interval (PFC ≈ 22–23 across the maintenance window and the ITI). A perturb-and-release control (transiently clamping all excitatory somata and watching recovery) was inconclusive on its own — the clamp is destructive and the post-clamp observation window short — but the autonomous-dynamics test in Section 3.2 already establishes that the rule state persists for ≥ 80 timesteps of zero-input recurrence.
+
+The verdict is that the rule is held in **recurrent dynamics**, not in feedforward connectivity. This is the property that matters for the transfer motivation: a rule maintained by an attractor is a piece of learned dynamics that could, in principle, be reused.
+
+![Q(core-2): the rule is maintained by recurrent dynamics. (a) Ensemble rule-decoding time course (mean ± SEM, n = 36); the rule is already decodable during the pre-card inter-trial interval (shaded), before card onset. (b) Pre-card vs late-delay decoding, paired across networks. (c) Recurrent rule-difference current is sustained through the inter-trial interval.]({{artifact:8fcab6fc-4c47-42cb-94c3-85c4b82d81b7}})
+
+### 3.4 Q(D): SST is not the unique controller of the rule-subspace angle
+
+The paper's headline mechanistic claim is that SST interneurons gate the SR rule-subspace angle. We tested *specificity*: does silencing SST collapse the angle uniquely, or do other perturbations do the same? For each network we measured the intact SR angle and the angle after silencing (i) SR-SST, (ii) SR-PV, (iii) SR-VIP, and (iv) a size-matched random subset of SR excitatory somata.
+
+Silencing SST collapses the angle (83° → 27°, Δ ≈ +56°, Wilcoxon p = 5.8 × 10⁻¹¹, n = 35) — but silencing **PV collapses it more** (83° → 9°, Δ ≈ +74°). VIP silencing has essentially no effect (83° → 82°, p = 0.92) and a random-E subset has a small effect (83° → 68°, Δ ≈ +15°). PV silencing also destabilises the network (9/35 networks diverge into runaway excitation), whereas SST/VIP/random-E silencing never does. So SST is not privileged: at least one other interneuron class (PV) collapses the angle at least as strongly.
+
+More importantly, the angle collapse tracks **task performance loss** across the board. Pooling all network × manipulation observations (n = 131), the angle change is well predicted by the performance change by a single linear fit (Pearson r = 0.86; R² ≈ 0.74, i.e. ≈74% of the variance in angle collapse is explained by performance drop alone). Relative to that performance-based prediction, SST's *residual* angle collapse is slightly **negative** (−6.9°): SST silencing collapses the angle *less* than its performance impact would predict, while PV has the largest positive residual (+12.3°). In other words, whatever specifically-SST contribution to the angle exists, it is smaller than the generic performance confound and smaller than PV's.
+
+We also examined the paper's SST→dendrite sparsity dose-response. The paper reports (Fig. 7c,d) that *dendritic branch-specific* rule encoding increases with SST→dendrite sparsity. That is a different quantity from the population-level angle-collapse magnitude we measured here, and the paper does not claim the latter should scale with sparsity. As an additional observation, we find that the SST-silencing angle-collapse magnitude does **not** increase with sparsity (Spearman r = −0.12, p = 0.49) — consistent with the collapse being a generic performance effect rather than a sparsity-graded, SST-branch-specific one. We flag this as an additional data point, not a direct contradiction of the paper's branch-specificity result.
+
+The verdict is that SST is **not** the unique controller of the rule-subspace angle. For the transfer motivation this is the key qualification: in this model, representational orthogonality behaves as a by-product of competent task performance, not as an independently SST-tunable dial. Controlling reuse of learned dynamics by "turning an SST knob" is therefore not supported by the model as it stands.
+
+![Q(D): SST is not the unique controller of the SR rule-subspace angle. (a) Angle collapse by silenced population — PV collapses the angle more than SST; VIP has little effect. (b) Fraction of trials diverging under each silencing (PV destabilises). (c) Angle collapse vs performance drop across all network × manipulation observations, with the linear fit (r = 0.86). (d) Residual angle collapse after regressing out performance: SST's residual is negative, PV's is the largest positive.]({{artifact:69017b60-c89f-46f5-87ea-4fa3c3c52751}})
+
+### 3.5 Q(A): PV interneurons — a graded role in performance, a threshold role in stability
+
+The user's original question was framed as "drop PV and see how the network learns without them." Rather than only retrain PV-free networks (a developmental question, deferred; see Discussion), we first tested PV *necessity acutely* by silencing PV neurons in the trained networks — the same optogenetic-style perturbation the original paper uses as its main causal tool, so the result is directly comparable to their methodology. To avoid a trivial all-or-none answer we ran a **dose-response**: silencing a graded number of PV neurons (0, 2, 5, 10, 15, 20 of the 20 total, balanced across both modules), across all 36 subtractive-main networks, with whole-network SST and VIP silencing as comparison controls.
+
+Two distinct regimes emerge (Fig. Q(A)). For losses up to about half the PV population, performance degrades **gracefully and the network stays dynamically stable**: mean task performance falls smoothly from 0.91 (intact) → 0.87 (2 silenced) → 0.69 (5) → 0.48 (10), rule decoding from 0.89 → 0.72 → 0.57, and *no* trials diverge (divergence fraction 0.00 throughout this range). Above that, the network hits a **stability cliff**: at 15 of 20 PV silenced, 72% of networks tip into runaway excitation (mean divergence 0.69) and performance collapses to 0.12; at full PV silencing all 36 networks diverge (divergence 0.98) and performance is ≈0.
+
+The controls localise this destabilisation to PV specifically. Whole-network **VIP** silencing has essentially no effect (performance 0.92, no divergence), and whole-network **SST** silencing degrades performance markedly (0.30) but leaves the network *stable* (divergence 0.13). Only removing PV causes excitation to run away.
+
+The interpretation is that PV interneurons play a **graded role in task computation but a threshold role in dynamical stability**. The network tolerates losing up to roughly half of its fast perisomatic inhibition with only proportional performance loss, but below a critical PV level it loses the inhibitory balance that keeps recurrent excitation bounded and diverges entirely. This is a distinction acute silencing can establish cleanly and one that a from-scratch PV-free retraining would confound (a network built without PV would either discover an alternative stabilisation mechanism or fail to train). It also makes a concrete prediction for the deferred retraining experiment: PV-free training should be markedly harder or unstable unless the network finds a substitute source of fast inhibition.
+
+![Q(A): PV interneurons play a graded role in performance and a threshold role in stability (n = 36 subtractive-main networks). (a) Task performance and rule decoding fall smoothly as PV neurons are silenced. (b) Divergence into runaway excitation appears only above ~75% PV loss — a stability cliff. (c) At matched full silencing, only PV loss destabilises the network; VIP silencing is near-inert and SST silencing degrades performance while preserving stability.]({{artifact:fc28938c-6cc3-40f1-b1e9-538edc944a95}})
+
+### 3.6 Q(B): dendrites and network size *(retraining deferred)*
+
+We considered addressing this question, like Q(A), by acute silencing — but concluded it would be uninformative here, for a structural reason worth stating. In this model the long-range top-down and bottom-up rule projections terminate on *dendrites* (PFC excitatory somata → SR dendrites; SR excitatory somata → PFC dendrites; Section 3.2). Clamping the dendritic compartments to zero would therefore sever the very channel through which the rule signal reaches each module — which is essentially the inter-modular lesion already reported in Section 3.2 (rule decoding collapses to at/below chance). It would *not* isolate the contribution of dendritic *computation* (the subtractive vs divisive nonlinearity), which is the interesting part of the question. Likewise, "shrink to a handful of neurons" cannot be tested by silencing at all: a network trained with 70 excitatory neurons per module does not contain a functioning 5-neuron solution to expose.
+
+Both sub-questions therefore genuinely require retraining — with dendritic branches collapsed (`n_branches = 1`) and with excitatory populations shrunk to ~5 neurons per module, alongside a shrink-only control that retains dendrites to separate the effect of dendritic computation from that of network size. The configurations and a multi-seed launcher are implemented and validated (Section 2.3); the runs are deferred pending a compute decision (full-timing training is required, per the timing finding in Section 2.3).
+
+### 3.7 Q(C): how the emergent properties arise during learning *(in progress)*
+
+*Using the weight checkpoints saved every 25 training steps, we will re-simulate each checkpoint and track when the rule attractor, the SR subspace orthogonality, and conjunctive selectivity emerge over the course of learning — testing whether they appear together or in a fixed order. This analysis runs on the training-trajectory checkpoints already saved and does not require additional retraining.*
+
+### 3.8 Capstone: subspace geometry and reuse of learned dynamics on a related task *(in progress)*
+
+*Motivated by the transfer question: after training on the base WCST, we will probe whether a network's rule-subspace geometry predicts how readily it reuses its learned dynamics on a related task, connecting the representational-geometry findings to the continual/transfer-learning motivation.*
+
+---
+
+## 4. Discussion
+
+The three completed analyses converge on a coherent revision of the original paper's framing. The rule representation is real, robust, and — as the paper argues — dependent on inter-modular connectivity. But two of our results refine where it lives and how it is controlled.
+
+**Locus and mechanism.** The rule is maintained not in PFC alone but in the PFC↔SR loop, and it is held by recurrent dynamics rather than feedforward re-derivation. The symmetry of the cross-module silencing and autonomous-collapse results argues against a strict PFC-as-controller / SR-as-follower hierarchy; both modules are load-bearing. This partially vindicates the initial skepticism that motivated the project — PFC is not the sole locus — while showing the alternative is not "SR instead of PFC" but "the interaction."
+
+**Controllability of geometry.** The result most consequential for the transfer motivation is negative. The SR rule-subspace angle, which the paper attributes to SST gating, behaves in our specificity analysis as a generic readout of task competence: PV silencing collapses it more than SST, and ≈74% of its variation across manipulations is explained by performance change alone, with SST contributing no positive residual. If the goal is to *control* representational overlap — to decide whether a network reuses learned dynamics for a related task — this model does not offer an SST "orthogonality knob." Any intervention that degrades performance also collapses the angle, so the angle is a symptom, not an independent lever.
+
+**Implications for the transfer-learning programme.** Two of our findings are nonetheless encouraging for that programme. The rule is carried by recurrent dynamics (Section 3.3), so it is exactly the kind of learned dynamical object one would want to reuse. And its maintenance is a distributed loop property (Section 3.2), which suggests representational reuse would be a system-level rather than a single-cell-class phenomenon. The capstone experiment (Section 3.8) will test the reuse question directly. What our results caution against is expecting a specific interneuron class to serve as a dedicated controller of representational geometry; the geometry appears to be an emergent consequence of how well the coupled system performs the task.
+
+**Limitations.** The completed analyses use the subtractive-dendrite fast-switching-main subset (n = 36) of the released ensemble; the divisive-dendrite variant (the paper's supplementary model) may behave differently, and the paper itself reports that the SST→angle effect is significant for subtractive but not divisive dendrites. Our silencing analysis clamps activity to zero, matching the paper's optogenetic-style perturbation, but is not identical to a biological manipulation. The retraining-based questions use a compressed trial timing validated to preserve task structure but not identical to the original; the retrained networks should be interpreted as a reimplementation rather than a bit-exact reproduction.
+
+---
+
+## 5. Code and data availability
+
+All analysis and training code is in the project's fork of the original repository (https://github.com/nickybu/BioRNN_WCST): `analysis.py` (analysis pipeline), `train_local.py` (resumable training harness), `ablations.py` and `run_ablations.py` (ablation configs and launcher). Per-network result tables (`core1_rule_locus.csv`, `core2_dynamics_vs_conn.csv`, `qD_sst_specificity.csv`, `validation_ensemble.csv`) and the figures reproduced here are provided as project artifacts.
+
+
+
